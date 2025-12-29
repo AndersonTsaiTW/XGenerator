@@ -1,0 +1,618 @@
+================================
+XGenerator EC2 部署完整指南
+================================
+作者: System
+日期: 2025-12-29
+目標環境: Amazon Linux 2023 + Docker
+部署網址: https://api.xgenerators.net
+
+本文檔說明如何將 XGenerator API 部署到 AWS EC2 並透過 HTTPS 對外服務。
+
+
+================================
+前置準備檢查清單
+================================
+
+✅ EC2 Instance 已建立並運行
+   - OS: Amazon Linux 2023
+   - Instance type: t3.small 或以上
+   - Storage: 30GB+
+
+✅ Security Group 設定
+   - 22 (SSH): 您的 IP
+   - 80 (HTTP): 0.0.0.0/0
+   - 443 (HTTPS): 0.0.0.0/0
+   - ❌ 不要開放 8000, 6379 (這些由 Docker 內部使用)
+
+✅ 網域設定完成
+   - DNS A record: api.xgenerators.net → EC2 Public IP
+   - Cloudflare DNS only mode (灰雲，不要橙雲)
+
+✅ HTTPS 憑證已設定
+   - Let's Encrypt 憑證
+   - 路徑: /etc/letsencrypt/live/api.xgenerators.net/
+
+✅ GitHub Repository
+   - Repo 設為 Public
+   - 程式碼已 push 到 main branch
+
+✅ 本地準備
+   - .env 不要 commit 到 GitHub
+   - .gitignore 包含敏感檔案
+
+
+================================
+部署方式概覽
+================================
+
+【架構圖】
+Internet (HTTPS 443)
+    ↓
+Nginx (TLS termination)
+    ↓
+127.0.0.1:8000
+    ↓
+Docker Network
+    ├── api        (FastAPI)         :8000
+    ├── worker     (Celery)
+    └── redis      (Message Queue)   :6379
+
+【資料持久化】
+Host: ~/apps/XGenerator/data/
+    ↓ (Docker Volume mount)
+Container: /app/data/
+    ├── datasets/
+    ├── artifacts/
+    ├── metadata/
+    └── users/
+
+
+================================
+部署步驟（完整版）
+================================
+
+────────────────────────────────
+步驟 1: 本地 - 準備程式碼
+────────────────────────────────
+
+【1.1 確認 .gitignore】
+位置: C:\Users\ander\Documents\GitHub\XGenerator\.gitignore
+
+必須包含:
+.env
+.venv/
+data/
+*.pem
+*.key
+__pycache__/
+.pytest_cache/
+htmlcov/
+.coverage
+
+
+【1.2 提交並推送到 GitHub】
+在 Windows PowerShell:
+
+cd C:\Users\ander\Documents\GitHub\XGenerator
+
+# 確認狀態
+git status
+
+# 加入檔案
+git add .
+
+# 提交
+git commit -m "Add deployment scripts and configs"
+
+# 推送
+git push origin main
+
+⚠️ 確認推送成功！訪問 GitHub 確認 deploy.sh 和 docker-compose.yml 都在。
+
+
+────────────────────────────────
+步驟 2: EC2 - SSH 連接
+────────────────────────────────
+
+【2.1 從 Windows 連接到 EC2】
+
+方法 1: PowerShell
+ssh -i "C:\Users\ander\Documents\GitHub\XGenerator\xgenerator-api-key.pem" ec2-user@api.xgenerators.net
+
+方法 2: VS Code Remote SSH
+1. 安裝 "Remote - SSH" 擴充套件
+2. Ctrl+Shift+P → "Remote-SSH: Connect to Host"
+3. 輸入: ssh -i "路徑\xgenerator-api-key.pem" ec2-user@api.xgenerators.net
+
+⚠️ 如果連線失敗:
+- 檢查 Security Group 是否允許 22 port
+- 檢查 .pem 檔案權限
+
+
+────────────────────────────────
+步驟 3: EC2 - 執行部署腳本
+────────────────────────────────
+
+【3.1 下載並執行自動化腳本】
+
+連接到 EC2 後，執行:
+
+# 下載部署腳本
+curl -O https://raw.githubusercontent.com/YOUR_USERNAME/XGenerator/main/deploy.sh
+
+# 給予執行權限
+chmod +x deploy.sh
+
+# 執行部署
+./deploy.sh
+
+⚠️ 記得把 YOUR_USERNAME 替換成您的 GitHub 使用者名稱！
+
+或者手動 clone 後執行:
+
+mkdir -p ~/apps
+cd ~/apps
+git clone https://github.com/YOUR_USERNAME/XGenerator.git
+cd XGenerator
+chmod +x deploy.sh
+./deploy.sh
+
+
+【3.2 腳本會做什麼】
+
+腳本會自動完成以下步驟:
+1. ✅ 安裝 git, docker
+2. ✅ 啟動並設定 Docker service
+3. ✅ 安裝 Docker Compose
+4. ✅ Clone GitHub repository
+5. ✅ 建立 data 目錄結構
+6. ⚠️ 檢查 .env 檔案
+
+如果 .env 不存在，腳本會暫停並提示您建立。
+
+
+────────────────────────────────
+步驟 4: EC2 - 設定環境變數
+────────────────────────────────
+
+【4.1 建立 .env 檔案】
+
+cd ~/apps/XGenerator
+nano .env
+
+貼上以下內容（記得替換真實的 API key）:
+
+OPENAI_API_KEY=sk-proj-your-actual-openai-key-here
+OPENAI_MODEL=gpt-3.5-turbo
+TESTING=false
+REDIS_URL=redis://redis:6379/0
+
+儲存: Ctrl+O → Enter → Ctrl+X
+
+
+【4.2 確認 .env 不會被 git 追蹤】
+
+git status
+
+如果看到 .env 出現在未追蹤檔案，立即:
+
+echo ".env" >> .gitignore
+git add .gitignore
+git commit -m "Ensure .env is ignored"
+
+
+────────────────────────────────
+步驟 5: EC2 - 啟動 Docker 服務
+────────────────────────────────
+
+【5.1 建置並啟動所有容器】
+
+cd ~/apps/XGenerator
+
+# 建置並啟動 (第一次需要較長時間)
+docker-compose up -d --build
+
+# 查看容器狀態
+docker-compose ps
+
+應該看到 3 個容器都是 "Up":
+- xgenerator_api
+- xgenerator_worker
+- xgenerator_redis
+
+
+【5.2 查看啟動日誌】
+
+# 查看所有容器日誌
+docker-compose logs
+
+# 只看 API 日誌
+docker-compose logs api
+
+# 即時追蹤日誌
+docker-compose logs -f api
+
+如果看到:
+INFO:     Uvicorn running on http://0.0.0.0:8000
+表示啟動成功！
+
+按 Ctrl+C 退出日誌查看。
+
+
+【5.3 測試 API (EC2 內部)】
+
+# 測試健康檢查
+curl http://localhost:8000/health
+
+# 應該回傳
+{"status":"healthy"}
+
+如果成功，表示 FastAPI 正常運行！
+
+
+────────────────────────────────
+步驟 6: EC2 - 設定 Nginx
+────────────────────────────────
+
+【6.1 編輯或建立 Nginx 設定】
+
+根據您的 Nginx 版本，路徑可能是:
+- /etc/nginx/conf.d/api.xgenerators.net.conf
+- /etc/nginx/sites-available/api.xgenerators.net
+
+執行:
+
+sudo nano /etc/nginx/conf.d/api.xgenerators.net.conf
+
+貼上以下完整設定:
+
+────────────────────────────────
+# HTTP → HTTPS redirect
+server {
+    listen 80;
+    server_name api.xgenerators.net;
+    return 301 https://$server_name$request_uri;
+}
+
+# HTTPS server
+server {
+    listen 443 ssl http2;
+    server_name api.xgenerators.net;
+
+    # SSL Configuration
+    ssl_certificate /etc/letsencrypt/live/api.xgenerators.net/fullchain.pem;
+    ssl_certificate_key /etc/letsencrypt/live/api.xgenerators.net/privkey.pem;
+    ssl_protocols TLSv1.2 TLSv1.3;
+    ssl_ciphers HIGH:!aNULL:!MD5;
+
+    # Security Headers
+    add_header Strict-Transport-Security "max-age=31536000; includeSubDomains" always;
+    add_header X-Content-Type-Options "nosniff" always;
+    add_header X-Frame-Options "DENY" always;
+    add_header X-XSS-Protection "1; mode=block" always;
+
+    # Logging
+    access_log /var/log/nginx/xgenerator-access.log;
+    error_log /var/log/nginx/xgenerator-error.log;
+
+    # Reverse Proxy to Docker container
+    location / {
+        proxy_pass http://127.0.0.1:8000;
+        proxy_http_version 1.1;
+        
+        # Headers
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+        proxy_set_header Upgrade $http_upgrade;
+        proxy_set_header Connection "upgrade";
+        
+        # Timeouts (模型訓練可能需要時間)
+        proxy_connect_timeout 300s;
+        proxy_send_timeout 300s;
+        proxy_read_timeout 300s;
+    }
+
+    # 允許大檔案上傳 (CSV datasets)
+    client_max_body_size 100M;
+    client_body_timeout 300s;
+}
+────────────────────────────────
+
+儲存: Ctrl+O → Enter → Ctrl+X
+
+
+【6.2 測試並重新載入 Nginx】
+
+# 測試設定檔語法
+sudo nginx -t
+
+如果看到 "syntax is ok" 和 "test is successful":
+
+# 重新載入 Nginx
+sudo systemctl reload nginx
+
+# 確認 Nginx 正在運行
+sudo systemctl status nginx
+
+
+────────────────────────────────
+步驟 7: 測試部署
+────────────────────────────────
+
+【7.1 從本地 Windows 測試】
+
+打開 PowerShell:
+
+# 測試首頁
+curl https://api.xgenerators.net/
+
+# 測試健康檢查
+curl https://api.xgenerators.net/health
+
+# 查看 API 文檔
+# 用瀏覽器開啟: https://api.xgenerators.net/docs
+
+
+【7.2 完整流程測試】
+
+# 1. 建立使用者
+curl -X POST https://api.xgenerators.net/users `
+  -H "Content-Type: application/json" `
+  -d '{"username":"testuser","email":"test@example.com"}'
+
+# 記下回傳的 user_id 和 api_key
+
+# 2. 列出所有使用者
+curl https://api.xgenerators.net/users
+
+# 3. 上傳資料集 (需要真實的 CSV 檔案)
+curl -X POST https://api.xgenerators.net/datasets `
+  -H "X-API-Key: sk_live_your_api_key" `
+  -F "file=@C:\path\to\your\data.csv" `
+  -F "user_id=user_xxx" `
+  -F "dataset_name=Test Dataset"
+
+
+【7.3 如果測試失敗】
+
+在 EC2 上檢查 logs:
+
+# Docker logs
+cd ~/apps/XGenerator
+docker-compose logs -f api
+
+# Nginx logs
+sudo tail -f /var/log/nginx/xgenerator-error.log
+
+
+────────────────────────────────
+步驟 8: 設定開機自動啟動
+────────────────────────────────
+
+【8.1 建立 systemd service】
+
+sudo nano /etc/systemd/system/xgenerator-docker.service
+
+貼上:
+
+────────────────────────────────
+[Unit]
+Description=XGenerator Docker Compose Service
+Requires=docker.service
+After=docker.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+WorkingDirectory=/home/ec2-user/apps/XGenerator
+ExecStart=/usr/local/bin/docker-compose up -d
+ExecStop=/usr/local/bin/docker-compose down
+TimeoutStartSec=0
+
+[Install]
+WantedBy=multi-user.target
+────────────────────────────────
+
+儲存後:
+
+sudo systemctl daemon-reload
+sudo systemctl enable xgenerator-docker.service
+sudo systemctl start xgenerator-docker.service
+
+
+【8.2 測試自動啟動】
+
+# 重啟 EC2 測試
+sudo reboot
+
+# 等待 1-2 分鐘後重新 SSH 連接
+
+# 檢查容器是否自動啟動
+docker ps
+
+應該看到 3 個容器正在運行。
+
+
+================================
+常用維護指令
+================================
+
+【查看服務狀態】
+cd ~/apps/XGenerator
+docker-compose ps
+
+【查看日誌】
+docker-compose logs -f api        # 即時 API 日誌
+docker-compose logs -f worker     # 即時 Worker 日誌
+docker-compose logs --tail=100    # 最近 100 行
+
+【重啟服務】
+docker-compose restart            # 重啟所有
+docker-compose restart api        # 只重啟 API
+
+【停止服務】
+docker-compose down               # 停止並移除容器
+docker-compose stop               # 只停止，不移除
+
+【更新程式碼】
+cd ~/apps/XGenerator
+git pull origin main              # 拉取最新程式碼
+docker-compose down               # 停止舊容器
+docker-compose up -d --build      # 重新建置並啟動
+
+【查看容器資源使用】
+docker stats
+
+【進入容器內部】
+docker exec -it xgenerator_api bash
+
+
+================================
+監控與除錯
+================================
+
+【檢查 API 是否正常】
+curl -I https://api.xgenerators.net/health
+
+【檢查 Redis 連線】
+docker exec -it xgenerator_redis redis-cli ping
+# 應該回傳 PONG
+
+【檢查資料目錄】
+ls -la ~/apps/XGenerator/data/
+
+【查看 Nginx 錯誤】
+sudo tail -f /var/log/nginx/xgenerator-error.log
+
+【查看 Docker 網路】
+docker network ls
+docker network inspect xgenerator_default
+
+
+================================
+安全性檢查清單
+================================
+
+✅ .env 不在 GitHub
+✅ Security Group 不開放 6379 (Redis)
+✅ Security Group 不開放 8000 (FastAPI)
+✅ HTTPS 強制啟用
+✅ API Key 認證啟用
+✅ Rate limiting 啟用
+✅ Nginx security headers 設定
+
+
+================================
+故障排除
+================================
+
+【問題 1: 無法連接到 API】
+檢查:
+1. docker-compose ps (容器是否運行)
+2. curl http://localhost:8000/health (EC2 內部測試)
+3. sudo systemctl status nginx (Nginx 是否運行)
+4. sudo nginx -t (Nginx 設定是否正確)
+
+【問題 2: 502 Bad Gateway】
+原因: Nginx 無法連接到 FastAPI
+檢查:
+1. docker-compose logs api
+2. netstat -tuln | grep 8000 (port 是否被佔用)
+3. 確認 docker-compose.yml 的 port mapping
+
+【問題 3: Docker 容器一直重啟】
+檢查:
+1. docker-compose logs --tail=100
+2. .env 檔案是否存在且正確
+3. OPENAI_API_KEY 是否有效
+
+【問題 4: 上傳 dataset 失敗】
+檢查:
+1. Nginx client_max_body_size 設定
+2. data/ 目錄權限 (chmod -R 755 data/)
+3. Docker volume mount 是否正確
+
+【問題 5: Celery worker 無法連接 Redis】
+檢查:
+1. docker network inspect xgenerator_default
+2. docker exec -it xgenerator_redis redis-cli ping
+3. .env 中的 REDIS_URL 設定
+
+
+================================
+效能優化建議
+================================
+
+【初期 (現在)】
+- Instance: t3.small
+- Workers: 2 (已在 docker-compose.yml 設定)
+- 適合: 開發、測試、少量用戶
+
+【成長期】
+- Instance: t3.medium 或 t3.large
+- Workers: 增加到 4-8
+- 考慮: RDS (PostgreSQL) 取代檔案系統
+- 考慮: S3 儲存 artifacts
+
+【擴展期】
+- Load Balancer + Auto Scaling Group
+- ElastiCache (Redis)
+- RDS Multi-AZ
+- S3 + CloudFront
+
+
+================================
+備份策略
+================================
+
+【重要資料】
+1. ~/apps/XGenerator/data/        (所有模型和 dataset)
+2. ~/apps/XGenerator/.env         (環境變數)
+3. /etc/nginx/conf.d/             (Nginx 設定)
+4. /etc/letsencrypt/              (SSL 憑證)
+
+【自動備份腳本 (建議)】
+#!/bin/bash
+DATE=$(date +%Y%m%d)
+tar -czf ~/backups/xgenerator-data-$DATE.tar.gz ~/apps/XGenerator/data/
+
+【還原步驟】
+cd ~/apps/XGenerator
+tar -xzf ~/backups/xgenerator-data-YYYYMMDD.tar.gz
+
+
+================================
+下一步擴展
+================================
+
+1. 【資料庫】改用 PostgreSQL 取代檔案系統
+2. 【儲存】S3 儲存模型 artifacts
+3. 【監控】CloudWatch + custom metrics
+4. 【日誌】集中式日誌管理 (ELK stack)
+5. 【CI/CD】GitHub Actions 自動部署
+6. 【測試】Production smoke tests
+
+
+================================
+聯絡資訊
+================================
+
+如遇到問題:
+1. 檢查 GitHub Issues
+2. 查看本文件的故障排除章節
+3. 檢查 API logs: docker-compose logs -f
+
+
+================================
+版本記錄
+================================
+
+v1.0 - 2025-12-29
+- 初始版本
+- Docker Compose 部署
+- Nginx HTTPS 設定
+- 基本監控與維護指令
+
+================================

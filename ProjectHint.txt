@@ -1,0 +1,1280 @@
+==============================
+XGBoost Training Service
+==============================
+
+【專案簡介】
+本專案是一個以 XGBoost 為核心的「模型訓練與預測 API 服務」，
+目標是讓使用者可以透過 HTTP API：
+
+- 上傳或指定資料
+- 指定訓練任務（分類 / 回歸）
+- 調整有限且安全的模型參數
+- 訓練模型並保存為可重用的 artifact
+- 查詢模型所需的輸入欄位（schema）
+- 使用既有模型進行預測
+
+本專案不提供自動模型選擇或參數搜尋（AutoML），而是專注於建立一個：
+- 可控
+- 可解釋
+- 可逐步擴充
+的 ML 服務骨架，重點放在：
+- 工程正確性（train / predict 一致）
+- API 設計
+- 可部署性
+- 後續擴充（背景任務、權限、多使用者）
+
+--------------------------------------------------
+
+【核心設計理念】
+- 模型不是由使用者「寫」，而是由系統提供固定模型類型
+- 使用者只能「設定模型怎麼學」
+- 前處理與模型必須封裝成單一 artifact
+- Schema 是正式資源，並與模型綁定
+- API 在 MVP 階段即具備產品化雛形
+- 權限與安控可延後實作，但結構必須預留
+
+--------------------------------------------------
+
+【支援的模型類型】
+- 分類（classification）
+  - 使用 XGBClassifier
+  - 適用於二元或多類分類問題
+- 回歸（regression）
+  - 使用 XGBRegressor
+  - 適用於數值預測問題
+
+--------------------------------------------------
+
+【整體架構演進概覽】
+- Step 1：同步 API（Dataset → Schema → Train → Predict）
+- Step 2：Pipeline / Schema 強化（非重構）
+- Step 3：背景訓練（Celery + Redis）
+- Step 3.5：權限設計預留（API Key → JWT）
+- Step 4：Docker + EC2 部署
+
+--------------------------------------------------
+
+【技術棧與環境】
+
+Python 版本：
+- Python 3.11+（穩定、性能優異、typing 支援完整）
+
+核心套件：
+- fastapi==0.109.0          # API 框架
+- uvicorn[standard]==0.27.0 # ASGI server
+- pydantic==2.5.3           # 資料驗證（v2）
+- python-multipart==0.0.6   # 支援 file upload
+
+ML 套件：
+- xgboost==2.0.3            # XGBoost 模型
+- scikit-learn==1.4.0       # Pipeline, ColumnTransformer
+- pandas==2.2.0             # 資料處理
+- numpy==1.26.3             # 數值計算
+- joblib==1.3.2             # 模型序列化
+
+工具套件：
+- python-dotenv==1.0.0      # 環境變數管理（Step 3+）
+
+--------------------------------------------------
+
+【專案結構】
+
+XGenerator/
+├── data/                      # 所有資料檔案（.gitignore）
+│   ├── datasets/              # CSV 原始檔案
+│   │   └── {dataset_id}.csv
+│   ├── artifacts/             # .joblib 模型檔案（大檔案，未來搬 S3）
+│   │   └── model_{model_id}.joblib
+│   └── metadata/              # 輕量級 JSON 檔案
+│       ├── datasets/          # dataset schema
+│       │   └── {dataset_id}_schema.json
+│       ├── models/            # model metadata
+│       │   └── model_{model_id}.json
+│       └── schemas/           # model schema（與 model 綁定）
+│           └── model_{model_id}_schema.json
+├── app/                       # FastAPI 應用程式碼
+│   ├── main.py                # FastAPI app entry
+│   ├── routers/               # API routes
+│   ├── services/              # 業務邏輯（train, predict）
+│   ├── models/                # Pydantic models
+│   └── utils/                 # 工具函式
+├── requirements.txt
+├── .env                       # 環境變數（不 commit）
+├── .gitignore
+└── README.md
+
+設計理由：
+- datasets/ 獨立：方便未來搬到 S3 或專用儲存
+- artifacts/ 獨立：大檔案專區，未來搬 S3 容易
+- metadata/ 集中管理所有 JSON：方便未來遷移到資料庫
+- 所有資料都在 data/ 下，與程式碼分離
+
+==================================================
+Implementation Steps
+==================================================
+
+--------------------------------
+Step 1：可用的 MVP（FastAPI，同步流程）
+--------------------------------
+
+【Step 1 目標】
+建立一個「真的能用」的 ML API，
+讓使用者可以完整走完一次訓練、重訓（re-train）與預測流程，
+並確保 train / predict 永遠使用一致的處理邏輯。
+
+Step 1 的重點不是效能或最佳模型，
+而是流程正確、資料理解清楚、行為可預期。
+
+--------------------------------
+【Step 1 API 列表】
+--------------------------------
+- POST   /datasets
+- PATCH  /datasets/{dataset_id}/schema        （使用者可選）
+- POST   /train
+- POST   /models/{model_id}/retrain
+- POST   /predict
+- GET    /models
+- GET    /models/{model_id}
+- GET    /models/{model_id}/schema
+
+--------------------------------
+【資料輸入限制（Step 1）】
+--------------------------------
+- 僅支援 CSV 檔案
+- 使用 multipart/form-data 上傳
+- 每個 dataset 對應一個 CSV
+
+（限制 CSV 是為降低 MVP 複雜度，未來可擴充其他格式）
+
+--------------------------------
+【ID 與檔案保存規則（Step 1）】
+--------------------------------
+- dataset_id 與 model_id 統一使用 uuid4().hex 產生（避免撞名，方便分散式儲存）
+- 寫檔建議使用「原子寫入」避免半成品檔案：
+  - 先寫到 temp 檔（例如 .tmp）
+  - 寫完再 rename 成正式檔名
+- 所有資料/模型皆存本機資料夾（Docker volume），未引入 DB 與 S3
+
+--------------------------------
+Step 1.1：Dataset 上傳與 Schema 推斷
+--------------------------------
+
+【POST /datasets】
+**認證要求**: 需要 X-API-Key header
+**Rate Limit**: 5/minute (per API key)
+
+- 接收 CSV 檔案、user_id、dataset_name
+- 建立 dataset_id（uuid4().hex）
+- 將檔案保存至 data/datasets/{dataset_id}.csv
+- 使用 pandas 讀取為 DataFrame
+- 自動推斷 schema（**使用 Tier-Based 智能推斷**）：
+  - 欄位名稱
+  - 欄位型別僅分兩類：numeric / categorical（MVP 定義）
+  - 推斷流程（**依照用戶 tier 決定**）：
+    
+    **Premium Tier（預設）：OpenAI-powered**
+    1. 使用 pandas 讀取 CSV，取得欄位名稱、dtype、sample values
+    2. 呼叫 OpenAI API（GPT-4 或 GPT-3.5-turbo）分析欄位特性
+    3. API Prompt 包含：欄位名稱、dtype、前 10 筆樣本值、unique 值數量
+    4. OpenAI 回傳每個欄位應為 numeric 或 categorical 的判斷
+    5. 優點：語義理解，識別 "customer_id" 為 categorical，"age" 為 numeric
+    
+    **Free Tier：Pandas heuristic**
+    1. 使用 pandas dtype 分析
+    2. int64/float64 但 unique 值很少（<20）→ categorical
+    3. int64/float64 且 unique 值多 → numeric
+    4. datetime 嘗試轉換 → numeric
+    5. object, bool → categorical
+    
+  - 基本原則（作為推斷參考）：
+    - int64/float64 但 unique 值很少 → 可能是 categorical（如 gender, status）
+    - int64/float64 且 unique 值多 → numeric（如 age, price）
+    - datetime64 → numeric（轉為 timestamp）
+    - object, bool, category → categorical
+- 保存初步 schema 至 data/metadata/datasets/{dataset_id}_schema.json
+- 回傳 schema preview（建議值）
+
+Schema 推斷為系統的「初步理解」，非最終結果。
+使用者可透過 PATCH 覆寫。
+
+【OpenAI API 設定】
+- Server-side key: .env 檔案設定 OPENAI_API_KEY（可選）
+- 推薦使用 gpt-3.5-turbo（成本低、速度快、準確度足夠）
+- Tier 系統：Premium 用戶使用 OpenAI，Free 用戶使用 pandas fallback
+- 錯誤處理：若 API 失敗，自動 fallback 到基本 pandas dtype 推斷
+
+--------------------------------
+Step 1.2：Schema 確認與覆寫（使用者可選）
+--------------------------------
+
+【目的】
+避免自動推斷錯誤影響模型訓練結果。
+
+【PATCH /datasets/{dataset_id}/schema】
+- 使用者可覆寫：
+  - numeric_features（list of string）
+  - categorical_features（list of string）
+- PATCH 行為：
+  - 使用者提供的欄位覆寫系統推斷
+  - 使用者未提供的欄位保持系統推斷值
+  - 更新後的 schema 保存至 data/metadata/datasets/{dataset_id}_schema.json
+- 驗證規則：
+  - 所有指定欄位必須存在於 dataset
+  - numeric_features 與 categorical_features 不可重複
+- 若未呼叫 PATCH，則直接使用系統推斷結果
+
+最終採用的 schema 將被保存，並與模型綁定。
+
+--------------------------------
+Step 1.3：模型訓練（最小版 pipeline + joblib）
+--------------------------------
+
+【POST /train】
+**認證要求**: 需要 X-API-Key header
+**Rate Limit**: 3/minute (per API key) - 訓練資源密集
+
+- 接收：
+  - user_id（必填：用戶 ID）
+  - model_name（必填：模型名稱，方便識別）
+  - dataset_id（必填）
+  - task_type（必填：classification / regression）
+  - target（必填：欄位名稱，使用者必須明確指定）
+  - features（optional：欄位名稱列表）
+    - 若未提供：自動使用「所有欄位（除了 target）」
+    - 若提供：僅使用指定欄位（不含 target）
+  - xgb_params（optional：Basic params）
+
+【xgb_params 規則（MVP，避免參數亂灌造成不穩定/安全風險）】
+- 只允許白名單 5 個 key：
+  - n_estimators
+  - learning_rate
+  - max_depth
+  - subsample
+  - colsample_bytree
+- 超出白名單的 key → 直接回 400（拒絕未知參數）
+- 參數範圍 validation（例）：
+  - n_estimators：1 ~ 5000（整數）
+  - learning_rate：0.0001 ~ 1.0
+  - max_depth：1 ~ 16（整數）
+  - subsample：0.0 ~ 1.0
+  - colsample_bytree：0.0 ~ 1.0
+- 未提供的參數使用 XGBoost 原生預設值（並在 metadata 中記錄「最終使用值」）
+
+【訓練行為】
+- 載入 dataset 與最終確認後的 schema
+- 建立「最小可用的 sklearn Pipeline」，包含：
+  - 缺值處理（SimpleImputer）
+  - 類別編碼（OneHotEncoder）
+  - XGBClassifier 或 XGBRegressor
+- 使用 pipeline.fit() 同步訓練模型
+- 使用 joblib 將整個 pipeline 存成檔案
+
+【輸出 / 保存（MVP：先用本機檔案保存，不用 DB）】
+- 建立 model_id（uuid4().hex）
+- 產生 model artifact：
+  - data/artifacts/model_{model_id}.joblib
+- 保存 schema artifact：
+  - data/metadata/schemas/model_{model_id}_schema.json
+- 保存模型 metadata（本機 JSON 檔）：
+  - data/metadata/models/model_{model_id}.json
+  - 內容至少包含：
+    - task_type / target / features
+    - 最終 xgb_params（含預設值補齊後的結果）
+    - dataset_id
+    - created_at
+    - （若為 re-train）parent_model_id
+- 回傳 model_id 與基本訓練摘要
+
+此階段的 pipeline 以「一致性」為唯一目標，不追求最佳效果。
+
+--------------------------------
+Step 1.4：模型重訓（Re-train，不覆蓋舊模型）
+--------------------------------
+
+【POST /models/{model_id}/retrain】
+
+【目的】
+允許使用新資料重新訓練模型，
+並保留完整的模型版本歷史。
+
+【接收】
+- dataset_id（新資料）
+- xgb_params（optional，若提供則覆寫原模型參數；仍套用白名單與範圍規則）
+
+【re-train 行為】
+- 讀取舊模型的 metadata：
+  - task_type
+  - target
+  - features
+  - schema
+- 驗證新 dataset：
+  - 必須包含舊模型所需的所有 feature 欄位
+  - 欄位的 dtype 必須與舊模型相容（numeric vs categorical）
+  - 缺少欄位 → 回傳 400 錯誤
+  - 多餘欄位 → 回傳警告，且不納入新模型（會被忽略）
+- 使用新 dataset 重新訓練模型
+- 建立新的 model_id
+- 保存新的 model artifact、schema、metadata
+
+【重要設計原則】
+- 不覆蓋舊模型
+- 每次 re-train 都產生全新的 model_id
+- 新模型 metadata 記錄：
+  - parent_model_id = 舊 model_id
+  - dataset_id = 新 dataset
+
+此設計可確保：
+- 模型可回溯
+- 可安全 rollback
+- 模型版本鏈清楚可追蹤
+
+--------------------------------
+Step 1.5：模型預測（/predict）
+--------------------------------
+
+【用途】
+使用既有模型對「一批資料列（rows）」進行預測。
+
+/predict 設計為「批次預測 API」：
+- 每一筆 row 為一次獨立預測
+- 一次 request 可同時預測多筆資料
+- 適用於推薦系統、打分、批量推論場景
+
+--------------------------------
+【POST /predict】
+--------------------------------
+
+Content-Type:
+application/json
+
+--------------------------------
+Request Body（MVP 最終版）
+--------------------------------
+
+{
+  "model_id": "<string>",
+  "rows": [
+    { "...": "..." },
+    { "...": "..." }
+  ]
+}
+
+--------------------------------
+Request 欄位說明
+--------------------------------
+
+- model_id
+  - 必填
+  - 要使用的模型 ID
+
+- rows
+  - 必填
+  - array of object
+  - 每一個 object 代表一筆預測資料
+  - rows 不可為空
+
+--------------------------------
+rows 資料規則（重要）
+--------------------------------
+
+- 每一個 row：
+  - 必須包含該模型 schema 定義的所有 required feature
+  - 欄位型別必須符合 schema（numeric / categorical）
+- row 中：
+  - 不可缺少 schema 要求的欄位
+  - 不可包含 schema 未定義的欄位
+
+模型只依賴 schema 定義的 feature，
+不使用任何純識別用途的欄位（例如 id、lamp_id、product_id）。
+
+--------------------------------
+推薦 / 打分場景說明
+--------------------------------
+
+在推薦場景中：
+
+- 不同商品（例如不同燈）
+  並不是用 ID 來表示
+- 而是以「不同的屬性組合」作為模型輸入
+
+同一使用者 × 多個商品：
+→ 對應為多筆 rows
+
+範例：
+
+{
+  "model_id": "abc123",
+  "rows": [
+    {
+      "user_age": 30,
+      "user_gender": "male",
+      "lamp_price": 499,
+      "lamp_type": "desk",
+      "brand": "Philips",
+      "watt": 10
+    },
+    {
+      "user_age": 30,
+      "user_gender": "male",
+      "lamp_price": 899,
+      "lamp_type": "floor",
+      "brand": "IKEA",
+      "watt": 20
+    }
+  ]
+}
+
+每一 row 為一個候選商品的屬性描述，
+模型輸出該 row 的預測分數或機率。
+
+--------------------------------
+Response（成功）
+--------------------------------
+
+HTTP 200 OK
+
+{
+  "model_id": "abc123",
+  "predictions": [
+    {
+      "row_index": 0,
+      "prediction": 0.82
+    },
+    {
+      "row_index": 1,
+      "prediction": 0.34
+    }
+  ]
+}
+
+--------------------------------
+Response 說明
+--------------------------------
+
+- row_index
+  - 對應 request rows 的 index
+
+- prediction
+  - classification：
+      - binary：為正類（positive class）的預測機率
+        - 正類定義：target label = 1
+        - 計算方式：predict_proba(X)[:, 1]
+      - multi-class：預測的類別標籤或機率（Step 1 暫不強調）
+  - regression：
+      - 預測的數值結果
+
+--------------------------------
+統一錯誤回傳格式（全域適用）
+--------------------------------
+
+所有 API 錯誤皆使用以下統一格式：
+
+{
+  "error": "<error_code>",
+  "message": "<human_readable_message>",
+  "details": <optional_object>
+}
+
+範例（預測資料不符合 schema）：
+
+HTTP 400 Bad Request
+{
+  "error": "schema_validation_failed",
+  "message": "Missing required feature: lamp_price",
+  "details": {
+    "hint": "Refer to GET /models/{model_id}/schema"
+  }
+}
+
+--------------------------------
+Prediction 錯誤處理
+--------------------------------
+
+- 欄位缺失：回傳 400 with schema_validation_failed
+- 欄位型別錯誤：回傳 400 with type_mismatch
+- 未知欄位：回傳 400 with unknown_field
+- Model 不存在：回傳 404 with model_not_found
+
+--------------------------------
+設計原則總結
+--------------------------------
+
+- /predict 預設支援批次預測
+- 模型只依賴 schema 定義的 feature
+- ID 類欄位不屬於模型輸入
+- 推薦與打分場景以「屬性組合」建模
+
+
+--------------------------------
+Step 1：GET /models 與 metadata 讀取方式（MVP）
+--------------------------------
+- GET /models：
+  - 掃描本機資料夾 data/metadata/models/ 下的 model_*.json 列出清單
+  - 回傳模型清單與基本資訊（model_id, task_type, created_at）
+- GET /models/{model_id}：
+  - 讀取 data/metadata/models/model_{model_id}.json
+  - 回傳完整模型 metadata
+- GET /models/{model_id}/schema：
+  - 讀取 data/metadata/schemas/model_{model_id}_schema.json
+  - 回傳模型所需的輸入欄位 schema
+- 此做法讓你 MVP 不必引入 DB
+- 未來改用 Postgres/RDS 也不影響 API（只換內部存取方式）
+
+--------------------------------
+Step 1 MVP 限制與範圍
+--------------------------------
+- 訓練與 re-train 期間 API 會阻塞（同步執行）
+- 僅適用於：
+  - MVP 階段
+  - 低併發或單人使用
+  - 中小型資料集
+- 不提供刪除功能：
+  - 無 DELETE /datasets/{dataset_id}
+  - 無 DELETE /models/{model_id}
+  - （未來可擴充）
+- 不限制檔案大小（MVP 階段）
+- 不考慮並行訓練衝突（單人使用場景）
+
+
+--------------------------------
+Step 2：Pipeline 與 Schema 強化（不改 API）
+--------------------------------
+
+【Step 2 目標】
+在不改變任何 API 行為與使用方式的前提下，
+強化 Step 1 中的 pipeline 與 schema 設計，
+讓系統在面對真實資料與錯誤輸入時更穩定、更安全。
+
+Step 2 不新增 API、不改變 request / response 結構，
+而是強化「內部實作品質」與「回傳資訊完整度」。
+
+--------------------------------
+【Step 2 強化項目與落點】
+--------------------------------
+
+(1) Pipeline 結構強化（ColumnTransformer）
+- 將 Step 1 的最小 pipeline 改為明確使用 ColumnTransformer
+- 依照 schema 分離處理：
+  - numeric_features：缺值補齊（SimpleImputer，strategy='median'）
+  - categorical_features：缺值補齊（SimpleImputer，strategy='most_frequent'）+ OneHotEncoder
+- OneHotEncoder 設定：
+  - handle_unknown='ignore'（預測時遇到未知類別值不報錯，自動處理為全 0 向量）
+  - drop='first'（避免共線性，optional）
+- pipeline 建立邏輯集中於單一函式（例如 build_pipeline(schema, task_type)）
+
+【影響範圍】
+- 僅影響內部 pipeline 實作
+- train / predict 的使用方式與輸出結果不變
+
+--------------------------------
+
+(2) Feature 與 Target 驗證強化
+- 在 train 前進行完整驗證：
+  - target 必須存在於 dataset 欄位中
+  - features 不可包含 target
+  - features、numeric_features、categorical_features 不可重複
+  - schema 中的欄位必須皆存在於 dataset
+- 在 datasets schema 覆寫時即做欄位存在性驗證
+
+【影響範圍】
+- API 回傳錯誤更早、訊息更明確
+- 可避免訓練過程中才發生難以理解的例外
+
+--------------------------------
+
+(3) Schema 補充資料統計資訊
+- 在 dataset schema 推斷與 model schema 保存時，補充以下資訊：
+  - missing_rate（缺值比例）
+  - unique_count（不同值數量）
+- schema 從單純欄位定義，提升為「資料結構描述」
+
+【使用者可見】
+- POST /datasets 回傳的 schema preview
+- GET /models/{model_id}/schema 回傳的 model schema
+
+--------------------------------
+
+(4) Predict 錯誤處理與錯誤訊息改善
+- predict 前進行完整輸入驗證：
+  - 必要欄位是否齊全
+  - 是否包含未知欄位
+  - 資料型別是否合理（仍以 numeric/categorical 為主）
+- 對常見錯誤提供結構化錯誤回傳，例如：
+  - schema 不符
+  - 欄位缺失
+- 未知類別值處理（Step 2 強化）：
+  - 使用 OneHotEncoder 的 handle_unknown='ignore' 自動處理
+  - 不回傳 400 錯誤，而是在 response 中加入 warnings 欄位
+  - 範例：{"model_id": "...", "predictions": [...], "warnings": ["Unknown category 'value_x' in field 'brand'"]}
+
+【使用者可見】
+- /predict 發生錯誤時回傳清楚的錯誤訊息
+- 錯誤回傳中提供提示，引導使用者查詢：
+  - GET /models/{model_id}/schema
+
+--------------------------------
+
+(5) 訓練 Metadata 記錄強化
+- 每次訓練完成後，記錄以下資訊：
+  - 訓練資料筆數與特徵數
+  - 使用的 task_type、target、features
+  - 最終使用的 xgb_params（含預設值）
+  - 訓練耗時
+- metadata 與 model_id 綁定保存（仍存 models/model_{model_id}.json）
+
+【使用者可見】
+- GET /models/{model_id} 回傳更完整的模型資訊
+
+--------------------------------
+
+(6) 模型效果評估（基礎指標，系統自動 validation）
+
+【目的】
+在不增加使用者操作成本、不改變 API 使用方式的前提下，
+為每一次模型訓練提供基本、可解釋的效果評估指標，
+協助使用者了解模型品質。
+
+【評估方式（MVP 預設）】
+- 系統採用固定的 hold-out validation（留出法）
+- 使用者僅需提供單一訓練資料集
+- 系統在訓練流程中自動進行資料切分：
+  - 訓練集（train）：約 80%
+  - 驗證集（validation）：約 20%
+
+【資料切分原則】
+- 使用隨機切分（random split）
+- 固定 random_state（例如 42），確保結果可重現
+- classification 任務時使用 stratified split：
+  - 保持 target label 在 train / validation 中的比例一致
+  - 避免類別不平衡導致指標失真
+
+【MVP 明確規則（避免實作歧義）】
+- MVP：模型 artifact 使用 train split（80%）訓練
+- validation split（20%）僅用於 metrics 計算
+- 不會再用全量資料重訓第二次（避免訓練時間翻倍；後續版本可再加入）
+
+【評估指標（依 task_type）】
+- classification：
+  - accuracy
+  - roc_auc（僅限 binary classification）
+- regression：
+  - mae
+  - rmse
+
+【設計原則】
+- 評估指標為系統內部的「基礎品質指標」
+- 非 AutoML，不進行模型搜尋或比較
+- 不提供使用者自訂切分策略或評估流程（MVP 階段）
+- 評估結果僅作為模型品質參考，而非最終效能保證
+
+【Metadata 記錄內容】
+每次訓練完成後，評估相關資訊將與 model_id 一起保存：
+- metrics（accuracy / roc_auc / mae / rmse）
+- evaluation_method：holdout
+- validation_split：0.2
+- random_state
+- sample_count（train / validation）
+
+【使用者可見】
+- GET /models/{model_id} 可查看模型評估指標
+- 評估結果清楚標示為：
+  - internal validation metrics
+
+--------------------------------
+【Step 2 完成後狀態】
+--------------------------------
+
+- 所有 API 行為與使用方式維持不變
+- artifact 格式（joblib + schema JSON）維持不變
+- train / predict 一致性更高
+- 錯誤回傳更可理解
+- 系統穩定度與可維護性明顯提升
+
+Step 2 為純內部品質強化階段，
+不影響使用者操作流程，卻為後續擴充與維運打下基礎。
+
+
+--------------------------------
+
+
+--------------------------------------------------
+
+
+--------------------------------
+Step 3：Celery + Redis（背景訓練）
+--------------------------------
+
+【目標】
+讓訓練不阻塞 API，支援長時間模型訓練。
+
+【新增元件】
+- Redis
+  - 作為任務佇列（broker）
+- Celery
+  - Python 背景任務框架
+- Worker
+  - 專門執行訓練任務的進程（獨立 container）
+
+【API 行為改變】
+- POST /train
+  - 建立 job 記錄
+  - 將訓練任務丟入 Celery queue
+  - 立即回傳 job_id
+
+- GET /jobs/{job_id}
+  - 查詢狀態：
+    - queued
+    - running
+    - succeeded
+    - failed
+  - 成功時回傳 model_id / artifact_path
+
+【系統結構】
+- API：負責接 request
+- Worker：負責跑訓練
+- Redis：負責任務傳遞
+
+【完成後狀態】
+- API 不再被訓練卡住
+- 可同時提交多個訓練任務
+- 系統行為接近正式 ML 平台
+
+
+--------------------------------
+Step 3.5：使用者管理與 API Key 認證
+--------------------------------
+
+【目標】
+實作多用戶支援與資源所有權管理，
+讓每個用戶可以：
+- 擁有自己的 datasets 和 models
+- 通過 API key 進行認證
+- 防止誤刪他人資源
+
+【設計原則】
+- 不實作 Project 概念（簡化）
+- 使用 API Key 而非 JWT（對 API 服務更友善）
+- User ID 自動生成 + username 用戶指定
+- Username 必須唯一
+- Dataset/Model 有 user_id 和 name（無 description）
+
+--------------------------------
+一、數據模型
+--------------------------------
+
+【User】
+{
+  "user_id": "user_abc123def456",    # 自動生成
+  "username": "john_doe",             # 用戶指定（唯一）
+  "email": "john@example.com",        # 選填
+  "api_key": "sk_live_abc123...",     # 創建時自動生成
+  "created_at": "2024-01-15T10:30:00Z"
+}
+
+【Dataset（更新）】
+{
+  "dataset_id": "ds_xyz789",
+  "dataset_name": "Q4 Customer Data",  # 新增（必填）
+  "user_id": "user_abc123",            # 新增（必填）
+  "filename": "customers_q4.csv",
+  "created_at": "...",
+  "schema": {...}
+}
+
+【Model（更新）】
+{
+  "model_id": "model_aaa111",
+  "model_name": "Churn Predictor v1",  # 新增（必填）
+  "user_id": "user_abc123",            # 新增（必填）
+  "dataset_id": "ds_xyz789",
+  "task_type": "classification",
+  "target": "churn",
+  "created_at": "...",
+  "metrics": {...}
+}
+
+--------------------------------
+二、API 端點設計
+--------------------------------
+
+【New: User Management】
+POST   /users                - 創建用戶（返回 user_id + api_key）
+GET    /users                - 列出所有用戶
+GET    /users/{user_id}      - 獲取用戶詳情
+
+【Updated: Datasets】
+POST   /datasets             - 需要 user_id, dataset_name
+GET    /datasets?user_id=xxx - 支援按用戶過濾
+DELETE /datasets/{id}        - 需要 X-API-Key header 驗證
+
+【Updated: Training】
+POST   /train                - 需要 user_id, model_name
+
+【Updated: Models】
+GET    /models?user_id=xxx   - 支援按用戶過濾
+PATCH  /models/{id}          - 更新 model_name（需驗證）
+DELETE /models/{id}          - 刪除（需驗證）
+
+--------------------------------
+三、API Key 認證機制
+--------------------------------
+
+【為什麼選擇 API Key 而非 JWT？】
+
+比較：
+- API Key：永久有效，簡單易用，適合 API 服務
+- JWT：需登入、自動過期、較複雜，適合 Web 應用
+
+結論：對於機器對機器的 API 服務，API Key 更合適
+
+【運作流程】
+1. 創建用戶時產生 API key
+   POST /users { "username": "john" }
+   → Returns: { "api_key": "sk_live_abc123..." }
+
+2. 每次請求帶上 API key
+   DELETE /datasets/ds_123
+   Header: X-API-Key: sk_live_abc123...
+
+3. Server 驗證
+   - 從所有用戶中查找匹配的 api_key
+   - 找到 → 允許，並獲得 user_id
+   - 找不到 → 401 Unauthorized
+
+4. 所有權驗證
+   - 檢查資源的 user_id 是否匹配
+   - 不匹配 → 403 Forbidden
+
+【實作】
+```python
+# 生成 API Key
+import secrets
+api_key = f"sk_live_{secrets.token_urlsafe(32)}"
+
+# 驗證
+async def verify_api_key(x_api_key: str = Header(...)):
+    for user_file in USERS_DIR.glob("*.json"):
+        user_data = json.load(open(user_file))
+        if user_data.get("api_key") == x_api_key:
+            return user_data
+    raise HTTPException(401, "Invalid API key")
+
+async def verify_ownership(resource_user_id: str, current_user: dict):
+    if resource_user_id != current_user["user_id"]:
+        raise HTTPException(403, "Forbidden")
+```
+
+--------------------------------
+四、檔案結構
+--------------------------------
+
+data/
+├── users/                      # 新增
+│   └── {user_id}.json         # 含 api_key
+├── datasets/
+│   ├── {dataset_id}.csv
+│   └── metadata/
+│       └── {dataset_id}.json  # 含 user_id, dataset_name
+├── artifacts/
+│   └── {model_id}.joblib
+└── metadata/
+    └── {model_id}.json        # 含 user_id, model_name
+
+--------------------------------
+五、實作階段
+--------------------------------
+
+Phase 1: User Management
+- [ ] User schemas
+- [ ] /users router
+- [ ] POST /users（含 api_key 生成）
+- [ ] GET /users
+- [ ] Username 唯一性驗證
+
+Phase 2: Authentication
+- [ ] verify_api_key() dependency
+- [ ] verify_ownership() helper
+
+Phase 3: Dataset 整合
+- [ ] 更新 schemas（加 user_id, dataset_name）
+- [ ] 修改 upload 邏輯
+- [ ] 加過濾功能
+- [ ] DELETE 驗證
+
+Phase 4: Model 整合
+- [ ] 更新 schemas（加 user_id, model_name）
+- [ ] 修改 train 邏輯
+- [ ] PATCH /models（更新名稱）
+- [ ] DELETE 驗證
+
+Phase 5: 測試
+- [ ] 刪除舊數據
+- [ ] 完整流程測試
+
+--------------------------------
+六、使用範例
+--------------------------------
+
+# 1. 創建用戶
+POST /users
+{ "username": "alice", "email": "alice@example.com" }
+→ { "user_id": "user_abc", "api_key": "sk_live_..." }
+
+# 2. 上傳 dataset
+POST /datasets -H "X-API-Key: sk_live_..."
+{ "user_id": "user_abc", "dataset_name": "My Data", "file": ... }
+
+# 3. 訓練模型
+POST /train -H "X-API-Key: sk_live_..."
+{ "user_id": "user_abc", "model_name": "My Model", ... }
+
+# 4. 列出我的模型
+GET /models?user_id=user_abc
+
+# 5. 更新模型名稱
+PATCH /models/model_xyz -H "X-API-Key: sk_live_..."
+{ "model_name": "New Name" }
+
+--------------------------------
+七、安全性說明
+--------------------------------
+
+【當前方案】
+- ✅ 防止誤刪
+- ✅ 用戶友好
+- ✅ 適合內部/開發用途
+- ❌ 非加密安全（API key 洩露即失控）
+- ❌ 無自動過期
+
+【適用場景】
+- 內部工具
+- 開發環境
+- 信任的用戶
+
+【未來升級（Phase 4+）】
+- JWT + 登入系統
+- API key 輪換
+- Rate limiting
+- Audit logs
+
+
+
+--------------------------------
+Step 4：部署到 EC2（雲端基礎架構與安控）
+--------------------------------
+
+【目標】
+將 xgenerator API 以 production-ready 架構部署到雲端，
+確保：
+- API 可穩定對外服務
+- 傳輸全程加密（HTTPS）
+- 內部服務不直接暴露
+- 後續可無痛升級為 Docker / AWS managed services
+
+本階段先完成「非 Docker」的正式上線骨架，
+Docker 化將在後續步驟進行。
+
+--------------------------------
+一、EC2 基礎環境
+--------------------------------
+
+【Instance】
+- OS：Amazon Linux 2023
+- Instance type：t3.small
+- Storage：gp3, 30GB
+- 使用 key pair（SSH key）登入
+
+【使用方式】
+- 使用 SSH / VS Code Remote SSH 操作
+- 不安裝 GUI
+- EC2 作為：
+  - API server
+  - 模型 artifacts storage
+  - 未來 Docker host
+
+--------------------------------
+二、網路與安全（Security Group）
+--------------------------------
+
+【Security Group 設計（最終狀態）】
+- 22 / SSH
+  - Source：個人 IP /32
+  - 僅供管理使用
+- 80 / HTTP
+  - Source：0.0.0.0/0
+  - 僅用於：
+    - HTTP → HTTPS redirect
+    - Let’s Encrypt 憑證驗證
+- 443 / HTTPS
+  - Source：0.0.0.0/0
+  - 對外 API 正式入口
+
+【重要原則】
+- ❌ 不對外開放 8000
+- ❌ FastAPI 不直接暴露於公網
+- ✅ 僅由 Nginx 作為對外入口
+
+--------------------------------
+三、API 服務架構（非 Docker）
+--------------------------------
+
+【FastAPI】
+- 專案路徑：
+  /home/ec2-user/apps/xgenerator-api
+- 使用 Python venv（Python 3.11）
+- FastAPI 只監聽：
+  127.0.0.1:8000
+
+【systemd 服務】
+- FastAPI 以 systemd service 常駐執行
+- 具備：
+  - 開機自動啟動
+  - 程序異常自動重啟
+- 不依賴 SSH session
+
+【systemd 特性】
+- API 即使 SSH 中斷仍持續運行
+- 為後續 Nginx / Docker 提供穩定 backend
+
+--------------------------------
+四、Nginx Reverse Proxy
+--------------------------------
+
+【Nginx 角色】
+- 作為唯一對外入口
+- 終止 TLS（HTTPS）
+- 將請求反向代理至：
+  127.0.0.1:8000（FastAPI）
+
+【HTTP → HTTPS】
+- 所有 HTTP (80) 請求永久轉址至 HTTPS (443)
+- API 不接受明文傳輸
+
+--------------------------------
+五、HTTPS / TLS（Let’s Encrypt）
+--------------------------------
+
+【Domain】
+- 使用子網域作為 API 入口：
+  api.xgenerators.net
+
+【DNS】
+- Cloudflare DNS
+- A record 指向 EC2 公網 IP
+- 設定為 DNS only（灰雲）
+  （避免 HTTP-01 challenge 被代理干擾）
+
+【憑證】
+- 使用 Certbot（nginx installer）
+- 憑證路徑：
+  /etc/letsencrypt/live/api.xgenerators.net/
+
+【自動續期】
+- certbot-renew.timer 啟用
+- 續期 dry-run 驗證成功
+- 無需人工介入
+
+--------------------------------
+六、最終流量路徑（Production 狀態）
+--------------------------------
+
+Internet
+  ↓
+HTTPS 443 (api.xgenerators.net)
+  ↓
+Nginx (TLS termination)
+  ↓
+127.0.0.1:8000
+  ↓
+FastAPI (systemd service)
+  ↓
+XGenerator backend logic
+
+--------------------------------
+七、Secrets 與設定管理
+--------------------------------
+
+【Secrets】
+- 使用 `.env` 檔管理：
+  - API keys
+  - DB credentials（未來）
+- `.env` 不 commit
+- 不將 secrets 寫入程式碼
+
+【Logs】
+- 不輸出敏感資訊
+- 僅記錄必要錯誤與請求資訊
+
+--------------------------------
+八、資料保存策略
+--------------------------------
+
+（Docker 化前即已考量）
+
+- 模型 artifacts（joblib / pickle）
+- 訓練資料 / datasets
+- 未來 DB data
+
+以上皆設計為：
+- 不依賴 container lifecycle
+- 可對應 volume / host directory
+
+--------------------------------
+九、進階事項（已規劃，部分待實作）
+--------------------------------
+
+A) XGBoost 模型整合（計畫中）
+- Training endpoints
+- Inference endpoints
+- 模型版本管理
+- joblib / artifact 儲存策略
+
+B) API Key / Authentication（建議下一步）
+- 使用 X-API-Key header
+- 最小可用安全門檻
+- 防止 API 被濫用
+
+C) Nginx 安全強化（建議）
+- Rate limiting（防暴力請求）
+- Security headers：
+  - HSTS
+  - X-Content-Type-Options
+  - X-Frame-Options
+
+--------------------------------
+十、Docker 化（尚未實作）
+--------------------------------
+
+【預計部署方式】
+- Docker Compose 啟動：
+  - api
+  - worker
+  - redis
+  - postgres（可選）
+
+【設計原則】
+- container 無狀態
+- 資料與模型使用 volume
+- secrets 仍由 .env 管理
+
+--------------------------------
+完成狀態
+--------------------------------
+
+- API 已可安全對外服務（HTTPS）
+- 基本雲端安控完成
+- 架構符合 production 標準
+- 可逐步升級為：
+  - Docker-based deployment
+  - AWS managed services
+
+
+--------------------------------
+總結
+--------------------------------
+
+Step 1：API 可用  
+Step 2：ML 正確  
+Step 3：系統可擴充  
+Step 3.5：權限不走冤枉路  
+Step 4：服務安全上線
+
+--------------------------------
+
+EC2
+├─ Docker
+│  ├─ api        (FastAPI)
+│  ├─ worker     (Celery)
+│  ├─ postgres   (PostgreSQL)
+│  └─ redis      (queue)
+
+--------------------------------
+
+================================
+新功能：用戶等級系統 (Tier System)
+================================
+【實作時間】2025-12-28
+【版本】v1.2.0
+
+一、用戶等級（Tier）
+--------------------
+所有用戶創建時自動設定為 "premium" tier。
+未來可擴展：
+- premium: 完整功能，OpenAI schema inference
+- free: 基本功能，pandas heuristic inference
+
+用戶 Schema 包含：
+- user_id
+- username
+- email  
+- tier: "premium" | "free"
+- api_key
+- created_at
+
+二、Tier-Based 功能區分
+--------------------
+【Dataset Schema Inference】
+- Premium tier: 
+  - 使用 OpenAI GPT-4/3.5-turbo
+  - 語義理解，更智能的分類
+  - 例：識別 "customer_id" 為 categorical
+  
+- Free tier:
+  - 使用 pandas dtype + heuristics
+  - 基於資料型別和 unique count
+  - 仍然可靠，適合大部分場景
+
+三、Rate Limiting 系統
+--------------------
+使用 slowapi 實作，分為兩類限制：
+
+【IP-based (公開端點)】
+- POST /users: 12/hour - 防止大量註冊
+- GET /users: 120/minute
+- GET /models: 120/minute
+
+【API Key-based (認證端點)】
+- POST /datasets: 5/minute - 上傳頻率限制
+- POST /train: 3/minute - 訓練成本高
+- POST /predict: 120/minute - 允許高頻預測
+- PATCH /models: 30/minute
+- DELETE /models: 30/minute
+
+【測試環境】
+設定 TESTING=true 自動禁用 rate limiting
+
+四、認證要求更新
+--------------------
+以下端點新增 X-API-Key 認證要求：
+- POST /datasets （原本無認證）
+- POST /train （原本無認證）
+- POST /predict （原本無認證）
+- PATCH /datasets/{id}/schema
+
+五、技術實作細節
+--------------------
+【檔案修改】
+- app/utils/rate_limit.py: 新增 rate limiter 配置
+- app/models/schemas.py: User schema 加 tier 欄位
+- app/routers/*.py: 所有 router 添加 rate limit decorators
+- app/main.py: 註冊 rate limiter middleware
+
+【向後兼容】
+- 舊用戶檔案沒有 tier 欄位時自動補 "premium"
+- 使用 getattr() 安全讀取
+
+【防禦機制】
+- Cloudflare: 網路層 DDoS 防護
+- slowapi: 應用層 rate limiting  
+- API Key: 用戶級別訪問控制
+- Ownership: 資源級別權限驗證
+
+六、未來擴展方向
+--------------------
+- 每日配額追蹤（datasets/train/predict per day）
+- 動態 rate limits（依照 tier 調整）
+- 付費升級機制
+- 使用量儀表板
+- Cost estimation & billing
+
+================================
