@@ -1,0 +1,23 @@
+# Python virtualenv (YOUR BIGGEST SIZE)
+.venv/
+venv/
+
+# Python caches
+__pycache__/
+*.pyc
+
+# Tests / coverage artifacts
+.pytest_cache/
+htmlcov/
+.coverage
+
+# Git (optional but recommended)
+.git/
+
+# environment variables
+.env
+.env.*
+
+# Training data examples
+train_full.csv
+test_full.csv

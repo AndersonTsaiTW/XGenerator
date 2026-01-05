@@ -65,7 +65,7 @@ async def create_user(request: Request, user_request: UserCreate):
         "user_id": user_id,
         "username": user_request.username,
         "email": user_request.email,
-        "tier": "premium",  # Default tier for all new users
+        "tier": "free",  # Default tier for all new users (prevents OpenAI token usage)
         "api_key": api_key,
         "created_at": created_at
     }

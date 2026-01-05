@@ -6,8 +6,7 @@ services:
       - "8000:8000"
     volumes:
       - ./data:/app/data
-    env_file:
-      - .env
+      - ./.env:/app/.env
     depends_on:
       - redis
     environment:
@@ -17,9 +16,8 @@ services:
   redis:
     image: redis:7-alpine
     container_name: xgenerator_redis
-    # PRODUCTION: do not expose Redis to host
-    # ports:
-    #   - "6379:6379"
+    ports:
+      - "6379:6379"
     restart: unless-stopped
 
   worker:
@@ -27,8 +25,7 @@ services:
     container_name: xgenerator_worker
     volumes:
       - ./data:/app/data
-    env_file:
-      - .env
+      - ./.env:/app/.env
     depends_on:
       - redis
     environment:

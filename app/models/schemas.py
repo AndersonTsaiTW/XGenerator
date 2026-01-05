@@ -36,7 +36,7 @@ class UserCreateResponse(BaseModel):
     user_id: str
     username: str
     email: Optional[str]
-    tier: str = "premium"  # User tier: "free" or "premium"
+    tier: str = "free"  # User tier: "free" or "premium"
     api_key: str  # Full API key - shown ONLY once
     created_at: str
     warning: str = "⚠️ Save this API key! It won't be shown again."

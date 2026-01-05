@@ -1,0 +1,107 @@
+
+XGenerator – Planned Updates (Docker / Celery / Redis Hardening)
+
+This document lists planned improvements identified during Docker & Celery architecture review.
+These changes are intended for the next iteration and focus on production-readiness and reliability.
+
+------------------------------------------------------------
+1. Redis Persistence & Safety
+------------------------------------------------------------
+
+- Add a named Docker volume for Redis data persistence.
+  Purpose:
+  - Prevent task loss when Redis container restarts.
+  - Ensure Celery broker data survives container crashes or redeploys.
+
+Planned change:
+- Update docker-compose.yml:
+  - Add redis data volume (e.g. redis-data:/data).
+  - Define volume under top-level volumes section.
+
+- Remove Redis external port exposure in production configuration.
+  Purpose:
+  - Avoid exposing Redis (no authentication by default).
+  - Restrict Redis access to internal Docker network only.
+
+------------------------------------------------------------
+2. Celery Startup Reliability
+------------------------------------------------------------
+
+- Improve Celery startup behavior when Redis is not yet ready.
+
+Reason:
+- docker-compose depends_on does not guarantee Redis readiness.
+- Workers may fail to connect during startup and crash-loop.
+
+Planned change:
+- Update Celery configuration in code:
+  - Enable broker connection retry on startup.
+    (broker_connection_retry_on_startup = True)
+
+------------------------------------------------------------
+3. Celery Worker Concurrency Control
+------------------------------------------------------------
+
+- Review and limit Celery worker concurrency settings.
+
+Reason:
+- Excessive concurrency can saturate CPU/memory.
+- Docker does not automatically protect the host from worker overload.
+
+Planned change:
+- Explicitly define reasonable concurrency values in docker-compose.
+- Tune based on workload type (CPU-bound vs I/O-bound tasks).
+
+------------------------------------------------------------
+4. Task Idempotency & Retry Safety
+------------------------------------------------------------
+
+- Review Celery task implementations for idempotency.
+
+Reason:
+- Celery tasks may be retried or re-delivered after worker crashes.
+- Non-idempotent tasks can cause duplicated processing or side effects.
+
+Planned change:
+- Audit task logic to ensure safe re-execution.
+- Consider task-level safeguards (e.g. task_id checks, acks_late where appropriate).
+
+------------------------------------------------------------
+5. API & Worker Observability
+------------------------------------------------------------
+
+- Improve visibility into worker health and task execution status.
+
+Reason:
+- API may accept tasks even if workers are down.
+- Failures are not always visible from the API side.
+
+Planned change:
+- Ensure all logs are written to STDOUT (Docker-friendly logging).
+- Consider adding basic worker health or task status checks.
+
+------------------------------------------------------------
+6. Development vs Production Configuration Separation
+------------------------------------------------------------
+
+- Clearly separate development-only Docker settings from production usage.
+
+Identified dev-only patterns:
+- Bind mounts for code/data (./data:/app/data).
+- Direct mounting of .env files.
+- Redis port exposure for local debugging.
+
+Planned change:
+- Maintain current compose file for local development.
+- Introduce production-safe configuration (or override) without bind mounts.
+
+------------------------------------------------------------
+Summary
+------------------------------------------------------------
+
+- Docker/Compose changes address infrastructure-level reliability.
+- Code changes address distributed system correctness.
+- These updates aim to make the system resilient to restarts, crashes, and scaling.
+
+No functional changes are required immediately.
+Items will be scheduled and implemented incrementally in future updates.
