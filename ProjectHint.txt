@@ -1,6 +1,16 @@
 ==============================
 XGBoost Training Service
 ==============================
+內部開發文件 (Internal Development Documentation)
+最後更新: 2026-01-05
+版本: v2.0 (Celery + Docker 架構)
+
+【文件說明】
+此文件紀錄 XGenerator 專案的設計理念與實作步驟。
+標記「【已完成】」的部分代表功能已實作。
+標記「【更新】」的部分說明原設計與現行實作的差異。
+
+==============================
 
 【專案簡介】
 本專案是一個以 XGBoost 為核心的「模型訓練與預測 API 服務」，
@@ -46,11 +56,11 @@ XGBoost Training Service
 --------------------------------------------------
 
 【整體架構演進概覽】
-- Step 1：同步 API（Dataset → Schema → Train → Predict）
-- Step 2：Pipeline / Schema 強化（非重構）
-- Step 3：背景訓練（Celery + Redis）
-- Step 3.5：權限設計預留（API Key → JWT）
-- Step 4：Docker + EC2 部署
+【已完成】Step 1：同步 API（Dataset → Schema → Train → Predict）
+【已完成】Step 2：Pipeline / Schema 強化（ColumnTransformer + 評估指標）
+【已完成】Step 3：背景訓練（Celery + Redis）
+【已完成】Step 3.5：使用者管理與 API Key 認證
+【已完成】Step 4：Docker Compose + EC2 部署（參見 projectHint_deploy.txt）
 
 --------------------------------------------------
 
@@ -701,8 +711,11 @@ Step 2 為純內部品質強化階段，
 
 
 --------------------------------
-Step 3：Celery + Redis（背景訓練）
+Step 3：Celery + Redis（背景訓練）【已完成】
 --------------------------------
+
+【實作時間】2025-12-28
+【版本】v2.0.0 (Breaking Change - 非同步 API)
 
 【目標】
 讓訓練不阻塞 API，支援長時間模型訓練。
@@ -741,8 +754,10 @@ Step 3：Celery + Redis（背景訓練）
 
 
 --------------------------------
-Step 3.5：使用者管理與 API Key 認證
+Step 3.5：使用者管理與 API Key 認證【已完成】
 --------------------------------
+
+【實作時間】2025-12-28
 
 【目標】
 實作多用戶支援與資源所有權管理，
@@ -960,8 +975,11 @@ PATCH /models/model_xyz -H "X-API-Key: sk_live_..."
 
 
 --------------------------------
-Step 4：部署到 EC2（雲端基礎架構與安控）
+Step 4：部署到 EC2（Docker Compose）【已完成】
 --------------------------------
+
+【實作時間】2025-12-29
+【部署方式】Docker Compose + Nginx + HTTPS
 
 【目標】
 將 xgenerator API 以 production-ready 架構部署到雲端，
@@ -969,10 +987,10 @@ Step 4：部署到 EC2（雲端基礎架構與安控）
 - API 可穩定對外服務
 - 傳輸全程加密（HTTPS）
 - 內部服務不直接暴露
-- 後續可無痛升級為 Docker / AWS managed services
+- 使用 Docker Compose 管理所有服務
 
-本階段先完成「非 Docker」的正式上線骨架，
-Docker 化將在後續步驟進行。
+【更新】原設計為先完成非 Docker 架構，後來直接採用 Docker Compose。
+完整部署指南請參見: projectHint_deploy.txt
 
 --------------------------------
 一、EC2 基礎環境
@@ -1195,10 +1213,12 @@ EC2
 ================================
 【實作時間】2025-12-28
 【版本】v1.2.0
+【更新】2026-01-05 - 預設 tier 改為 "free"
 
 一、用戶等級（Tier）
 --------------------
-所有用戶創建時自動設定為 "premium" tier。
+【更新】所有用戶創建時自動設定為 "free" tier。
+原設計為 "premium"，後改為 "free" 以避免 OpenAI API token 被消耗。
 未來可擴展：
 - premium: 完整功能，OpenAI schema inference
 - free: 基本功能，pandas heuristic inference

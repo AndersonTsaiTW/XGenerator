@@ -2,11 +2,37 @@
 XGenerator EC2 部署完整指南
 ================================
 作者: System
-日期: 2025-12-29
+初版日期: 2025-12-29
+最後更新: 2026-01-05
 目標環境: Amazon Linux 2023 + Docker
 部署網址: https://api.xgenerators.net
 
 本文檔說明如何將 XGenerator API 部署到 AWS EC2 並透過 HTTPS 對外服務。
+此文件已整合 DEPLOY_README.md 與 DEPLOY_CHECKLIST.md 的內容。
+
+
+================================
+TL;DR 快速指令 (適合熟悉流程者)
+================================
+
+# SSH 連接
+ssh -i your-key.pem ec2-user@api.xgenerators.net
+
+# 進入專案目錄
+cd ~/apps/XGenerator
+
+# 拉取最新程式碼
+git pull origin main
+
+# 重新建置並啟動
+docker compose up -d --build
+
+# 查看狀態
+docker compose ps
+docker compose logs -f api
+
+# 健康檢查
+curl https://api.xgenerators.net/health
 
 
 ================================
