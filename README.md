@@ -1,8 +1,7 @@
 # XGenerator
 
-**XGBoost Training & Prediction API Service**
-
-A production-ready REST API for training XGBoost models and making predictions. Upload CSV datasets, train classification/regression models, and get predictions via simple HTTP endpoints.
+**XGBoost Training & Prediction API Service**  
+A production-ready REST API for training XGBoost models and making predictions. Upload CSV datasets, train classification/regression models, and get predictions via simple HTTP endpoints. [(Documents)](https://api.xgenerators.net/docs)
 
 ## Features
 
