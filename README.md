@@ -1,20 +1,66 @@
 # XGenerator
+Backend ML inference service with asynchronous task processing (FastAPI + Redis + Celery), designed to handle concurrent workloads and long-running training jobs.
+**Scalable ML Inference & Training API Service**  
+XGenerator is a scalable backend service for training and serving XGBoost machine learning models via REST APIs. [(Documents)](https://api.xgenerators.net/docs)
 
-**XGBoost Training & Prediction API Service**  
-A production-ready REST API for training XGBoost models and making predictions. Upload CSV datasets, train classification/regression models, and get predictions via simple HTTP endpoints. [(Documents)](https://api.xgenerators.net/docs)
+## Tech Stack
+
+Backend: FastAPI (Python)  
+Queue: Celery + Redis  
+Database: Not currently used (planned PostgreSQL integration for persistent storage and scaling)  
+Infrastructure: Docker, AWS EC2, Nginx  
+ML: XGBoost  
+
+## System Architecture
+
+```
+Client (HTTP Requests)
+    |
+    v
+FastAPI API Server
+    |
+    v
+Redis (Message Broker / Task Queue)
+    |
+    v
+Celery Worker (Background Processing)
+    |
+    v
+XGBoost Model (Training / Inference)
+```
+
+## Design Highlights
+
+- FastAPI handles HTTP requests and validation
+- Celery processes long-running tasks asynchronously
+- Redis acts as a message broker between API and workers
+- Docker containers isolate services for deployment
+
+### Scalability Design
+
+XGenerator separates API request handling from compute-heavy tasks using Celery workers.
+
+This allows the API server to remain responsive while training jobs are processed asynchronously.
+
+## Key design decisions:
+
+- Task queue architecture for long-running jobs
+- Stateless API design for horizontal scaling
+- Redis-based message broker for worker coordination
+- Containerized services for flexible deployment
 
 ## Features
 
-- **Dataset Upload** - CSV upload with intelligent schema inference
-- **Model Training** - XGBoost classification & regression with background processing (Celery + Redis)
-- **Batch Predictions** - Predict on multiple rows with missing value handling
-- **User Management** - API key authentication with tier-based features
-- **Rate Limiting** - Protection against abuse
-- **Auto Evaluation** - 80/20 train/validation split with metrics
+- Dataset Upload - CSV upload with schema inference and validation
+- Asynchronous Model Training (Celery + Redis) - XGBoost classification & regression with background task processing
+- Batch Prediction API - Predict on multiple rows with missing value handling
+- API Key Authentication - User management with tier-based access control
+- Rate Limiting - Request throttling to prevent abuse
+- Automatic Model Evaluation - 80/20 train/validation split with performance metrics
 
 ---
 
-## 🚀 Quick Start (Docker)
+## Quick Start (Docker)
 
 ### Prerequisites
 
@@ -57,7 +103,7 @@ open http://localhost:8000/docs
 
 ---
 
-## 📖 Basic Usage
+## Basic Usage
 
 ### 1. Create User
 
@@ -76,7 +122,7 @@ curl -X POST http://localhost:8000/users \
 }
 ```
 
-> ⚠️ **Save your API key!** It's only shown once.
+> **Save your API key!** It's only shown once.
 
 ### 2. Upload Dataset
 
@@ -125,7 +171,7 @@ curl -X POST http://localhost:8000/predict \
 
 ---
 
-## 🔧 API Endpoints
+## API Endpoints
 
 | Method | Endpoint | Description |
 |--------|----------|-------------|
@@ -145,7 +191,7 @@ curl -X POST http://localhost:8000/predict \
 
 ---
 
-## ⚙️ Environment Variables
+## Environment Variables
 
 Create `.env` file:
 
@@ -158,7 +204,7 @@ TESTING=false              # Set true to disable rate limits
 
 ---
 
-## 🔒 Rate Limits
+## Rate Limits
 
 | Endpoint | Limit |
 |----------|-------|
@@ -169,13 +215,13 @@ TESTING=false              # Set true to disable rate limits
 
 ---
 
-## 🚢 Production Deployment
+## Production Deployment
 
 For EC2/Docker deployment guide, see: [`projectHint_deploy.txt`](projectHint_deploy.txt)
 
 ---
 
-## 📁 Project Structure
+## Project Structure
 
 ```
 XGenerator/
@@ -197,13 +243,13 @@ XGenerator/
 
 ---
 
-## 📄 License
+## License
 
 MIT
 
 ---
 
-## 📚 Documentation
+## Documentation
 
 - **API Docs:** http://localhost:8000/docs (Swagger UI)
 - **Internal Dev Guide:** [ProjectHint.txt](ProjectHint.txt) (Chinese)
