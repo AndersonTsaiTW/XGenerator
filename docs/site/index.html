@@ -1,0 +1,68 @@
+<!doctype html>
+<html lang="zh-Hant">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>XGenerator API Docs</title>
+    <style>
+      body {
+        margin: 0;
+        padding: 0;
+        font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      }
+
+      #redoc-error {
+        display: none;
+        margin: 24px;
+        padding: 16px;
+        border: 1px solid #e2a8a8;
+        border-radius: 8px;
+        background: #fff3f3;
+        color: #7a1111;
+      }
+    </style>
+  </head>
+  <body>
+    <div id="redoc-container"></div>
+    <div id="redoc-error"></div>
+    <script>
+      (function () {
+        var errorEl = document.getElementById("redoc-error");
+        var containerEl = document.getElementById("redoc-container");
+        var specUrl = "./openapi.json";
+
+        function showError(message) {
+          errorEl.style.display = "block";
+          errorEl.textContent = message;
+        }
+
+        if (window.location.protocol === "file:") {
+          showError(
+            "You are opening the file directly with file://. Please use a local HTTP server (e.g., python -m http.server) instead, or the browser may not be able to load openapi.json."
+          );
+          return;
+        }
+
+        var script = document.createElement("script");
+        script.src = "https://cdn.jsdelivr.net/npm/redoc@2.1.3/bundles/redoc.standalone.js";
+        script.onload = function () {
+          if (!window.Redoc || !window.Redoc.init) {
+            showError("ReDoc script loaded but initialization failed.");
+            return;
+          }
+
+          window.Redoc.init(specUrl, {}, containerEl, function (error) {
+            if (error) {
+              showError("Failed to load openapi.json. Please confirm the file exists and is accessible via HTTP.");
+            }
+          });
+        };
+        script.onerror = function () {
+          showError("Failed to load ReDoc from CDN. Please check your network, firewall, or try again later.");
+        };
+
+        document.body.appendChild(script);
+      })();
+    </script>
+  </body>
+</html>

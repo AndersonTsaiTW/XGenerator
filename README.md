@@ -176,7 +176,38 @@ For EC2/Docker deployment guide, see: [`projectHint_deploy.txt`](projectHint_dep
 
 ---
 
-## 📁 Project Structure
+## � API Documentation
+
+### Static Docs Website
+
+API documentation is available as a static HTML site (ReDoc):
+- **Live:** https://AndersonTsaiTW.github.io/xgenerator (after deploying to GitHub Pages)
+- **Local (development):** Run `python -m http.server 8010 --directory docs/site`, then open http://127.0.0.1:8010
+
+### Generating Documentation
+
+To regenerate the OpenAPI spec and documentation:
+
+```bash
+python scripts/export_openapi.py
+```
+
+This script:
+1. Imports the FastAPI app from `app/main.py`
+2. Extracts the OpenAPI 3.1.0 schema
+3. Exports to `docs/site/openapi.json`
+4. The `docs/site/index.html` automatically loads and renders it with ReDoc
+
+### CI/CD
+
+API docs are automatically published to GitHub Pages on every push to `main`:
+- GitHub Actions workflow: [`.github/workflows/publish-docs.yml`](.github/workflows/publish-docs.yml)
+- Trigger: Push to `main` branch or manual workflow dispatch
+- Deployment: Static files from `docs/site/` uploaded to GitHub Pages
+
+---
+
+## �📁 Project Structure
 
 ```
 XGenerator/
