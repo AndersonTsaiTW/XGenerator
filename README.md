@@ -1,7 +1,7 @@
 # XGenerator
 Backend ML inference service with asynchronous task processing (FastAPI + Redis + Celery), designed to handle concurrent workloads and long-running training jobs.
 **Scalable ML Inference & Training API Service**  
-XGenerator is a scalable backend service for training and serving XGBoost machine learning models via REST APIs. [(Documents)](https://api.xgenerators.net/docs)
+XGenerator is a scalable backend service for training and serving XGBoost machine learning models via REST APIs. [(Documents)](https://AndersonTsaiTW.github.io/XGenerator)
 
 ## Tech Stack
 
@@ -226,7 +226,7 @@ For EC2/Docker deployment guide, see: [`projectHint_deploy.txt`](projectHint_dep
 ### Static Docs Website
 
 API documentation is available as a static HTML site (ReDoc):
-- **Live:** https://AndersonTsaiTW.github.io/xgenerator (after deploying to GitHub Pages)
+- **Live:** https://AndersonTsaiTW.github.io/XGenerator (after deploying to GitHub Pages)
 - **Local (development):** Run `python -m http.server 8010 --directory docs/site`, then open http://127.0.0.1:8010
 
 ### Generating Documentation
