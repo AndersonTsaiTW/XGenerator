@@ -4,6 +4,10 @@ on:
   push:
     branches:
       - main
+    paths:
+      - "app/**"
+      - "scripts/export_openapi.py"
+      - ".github/workflows/publish-docs.yml"
   workflow_dispatch:
 
 permissions:
