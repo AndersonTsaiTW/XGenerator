@@ -3,8 +3,20 @@ name: Tests
 on:
   push:
     branches: [ main ]
+    paths:
+      - "app/**"
+      - "tests/**"
+      - "requirements.txt"
+      - "requirements-dev.txt"
+      - ".github/workflows/test.yml"
   pull_request:
     branches: [ main ]
+    paths:
+      - "app/**"
+      - "tests/**"
+      - "requirements.txt"
+      - "requirements-dev.txt"
+      - ".github/workflows/test.yml"
 
 jobs:
   test:
